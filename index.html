@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registro de Presença</title>
+    <!-- Tailwind CSS CDN para estilização -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fonte Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+            width: 100%;
+            max-width: 600px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        video, canvas {
+            border-radius: 8px;
+            background-color: #000;
+            width: 100%;
+            height: auto; /* Mantém a proporção */
+            max-height: 450px; /* Limite de altura para telas maiores */
+            object-fit: cover; /* Garante que o vídeo preencha o espaço */
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .video-container canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        button {
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.15);
+        }
+        .message-box {
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            padding: 10px;
+            font-weight: 500;
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            flex-direction: column;
+            gap: 15px;
+            font-size: 1.2rem;
+            color: #333;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6; /* Tailwind blue-500 */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <p>Carregando modelos de IA e configurando Firebase...</p>
+    </div>
+
+    <div class="container">
+        <h1 class="text-3xl font-bold text-gray-800">Registro de Presença</h1>
+        <p class="text-sm text-gray-600">ID do Usuário: <span id="userIdDisplay" class="font-semibold text-blue-600 break-all">Carregando...</span></p>
+
+        <div class="video-container">
+            <video id="video" autoplay muted playsinline class="rounded-lg shadow-md"></video>
+            <canvas id="canvas" class="absolute top-0 left-0"></canvas>
+        </div>
+
+        <button id="registerButton"
+            class="bg-blue-600 text-white px-6 py-3 rounded-xl font-semibold text-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+            disabled>
+            Registrar Presença
+        </button>
+
+        <div id="messageBox" class="message-box bg-gray-100 text-gray-700">
+            Aguardando câmera...
+        </div>
+
+        <h2 class="text-xl font-semibold text-gray-800 mt-4">Registros Anteriores:</h2>
+        <div id="attendanceList" class="bg-gray-50 p-4 rounded-lg shadow-inner max-h-60 overflow-y-auto text-left">
+            <p class="text-gray-500">Nenhum registro ainda.</p>
+        </div>
+    </div>
+
+    <!-- Face-API.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, collection, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variáveis globais fornecidas pelo ambiente Canvas
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = 'loading'; // Inicializa com um valor para indicar carregamento
+        let isAuthReady = false; // Flag para indicar que a autenticação foi concluída
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const registerButton = document.getElementById('registerButton');
+        const messageBox = document.getElementById('messageBox');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const attendanceList = document.getElementById('attendanceList');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+
+        const MODEL_URL = './models'; // Certifique-se de que a pasta 'models' está no mesmo nível do seu HTML
+
+        // Função para exibir mensagens na caixa de mensagem
+        function showMessage(message, type = 'info') {
+            messageBox.textContent = message;
+            messageBox.className = 'message-box'; // Reseta as classes
+            if (type === 'success') {
+                messageBox.classList.add('bg-green-100', 'text-green-700');
+            } else if (type === 'error') {
+                messageBox.classList.add('bg-red-100', 'text-red-700');
+            } else {
+                messageBox.classList.add('bg-gray-100', 'text-gray-700');
+            }
+        }
+
+        // Função para carregar os modelos da face-api.js
+        async function loadModels() {
+            try {
+                showMessage('Carregando modelos de IA...', 'info');
+                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL); // Opcional, mas útil para demonstração
+                await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL); // Para detecção de rosto mais robusta
+                showMessage('Modelos carregados com sucesso!', 'success');
+                registerButton.disabled = false; // Habilita o botão após carregar os modelos
+            } catch (error) {
+                console.error('Erro ao carregar modelos:', error);
+                showMessage('Erro ao carregar modelos de IA. Verifique o console e a pasta "models".', 'error');
+            }
+        }
+
+        // Função para iniciar a câmera
+        async function startCamera() {
+            try {
+                showMessage('Aguardando permissão da câmera...', 'info');
+                const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+                video.srcObject = stream;
+                video.addEventListener('play', () => {
+                    // Ajusta o tamanho do canvas para corresponder ao vídeo
+                    const displaySize = { width: video.videoWidth, height: video.videoHeight };
+                    faceapi.matchDimensions(canvas, displaySize);
+
+                    // Loop de detecção facial contínua
+                    setInterval(async () => {
+                        if (!video.paused && !video.ended) {
+                            const detections = await faceapi.detectAllFaces(video, new faceapi.SsdMobilenetv1Options()) // Usando SsdMobilenetv1Options para detecção
+                                .withFaceLandmarks()
+                                .withFaceExpressions();
+
+                            const resizedDetections = faceapi.resizeResults(detections, displaySize);
+                            canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+                            faceapi.draw.drawDetections(canvas, resizedDetections);
+                            faceapi.draw.drawFaceLandmarks(canvas, resizedDetections);
+                            faceapi.draw.drawFaceExpressions(canvas, resizedDetections);
+                        }
+                    }, 100); // Roda a cada 100ms
+                    showMessage('Câmera ativa. Pronto para registrar presença.', 'info');
+                });
+            } catch (err) {
+                console.error('Erro ao acessar a câmera:', err);
+                showMessage('Erro ao acessar a câmera. Verifique as permissões.', 'error');
+                registerButton.disabled = true;
+            }
+        }
+
+        // Função para registrar a presença
+        async function registerPresence() {
+            if (!isAuthReady) {
+                showMessage('Autenticação Firebase não concluída. Tente novamente em breve.', 'error');
+                return;
+            }
+            if (!video.srcObject) {
+                showMessage('Câmera não está ativa.', 'error');
+                return;
+            }
+
+            showMessage('Registrando presença...', 'info');
+            registerButton.disabled = true; // Desabilita o botão para evitar múltiplos cliques
+
+            try {
+                // Captura um frame do vídeo para análise
+                const tempCanvas = faceapi.createCanvasFromMedia(video);
+                const displaySize = { width: video.videoWidth, height: video.videoHeight };
+                faceapi.matchDimensions(tempCanvas, displaySize);
+                const context = tempCanvas.getContext('2d');
+                context.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+
+                const detections = await faceapi.detectAllFaces(tempCanvas, new faceapi.SsdMobilenetv1Options());
+
+                if (detections.length > 0) {
+                    // Rosto detectado
+                    const attendanceRef = collection(db, `artifacts/${appId}/users/${userId}/attendance_records`);
+                    await setDoc(doc(attendanceRef), {
+                        timestamp: serverTimestamp(),
+                        userId: userId,
+                        status: 'presente'
+                    });
+                    showMessage('Presença Registrada com Sucesso!', 'success');
+                } else {
+                    // Nenhum rosto detectado
+                    showMessage('Nenhum Rosto Detectado! Por favor, posicione-se melhor.', 'error');
+                }
+            } catch (error) {
+                console.error('Erro ao registrar presença:', error);
+                showMessage('Erro ao registrar presença. Tente novamente.', 'error');
+            } finally {
+                registerButton.disabled = false; // Reabilita o botão
+            }
+        }
+
+        // Função para carregar e exibir os registros de presença
+        function loadAttendanceRecords() {
+            if (!isAuthReady || !db || !userId) {
+                console.log("Firestore ou userId não estão prontos para carregar registros.");
+                return;
+            }
+
+            const attendanceCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/attendance_records`);
+            // Nota: Evitando orderBy para evitar problemas de índice.
+            // A ordenação será feita em memória.
+
+            onSnapshot(attendanceCollectionRef, (snapshot) => {
+                const records = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    records.push({
+                        id: doc.id,
+                        timestamp: data.timestamp ? data.timestamp.toDate() : new Date(), // Converte Timestamp para Date
+                        status: data.status
+                    });
+                });
+
+                // Ordenar em memória (mais recente primeiro)
+                records.sort((a, b) => b.timestamp - a.timestamp);
+
+                attendanceList.innerHTML = ''; // Limpa a lista existente
+
+                if (records.length === 0) {
+                    attendanceList.innerHTML = '<p class="text-gray-500">Nenhum registro ainda.</p>';
+                } else {
+                    records.forEach(record => {
+                        const date = record.timestamp.toLocaleDateString('pt-BR');
+                        const time = record.timestamp.toLocaleTimeString('pt-BR');
+                        const listItem = document.createElement('p');
+                        listItem.className = 'text-sm text-gray-800 mb-1';
+                        listItem.innerHTML = `<span class="font-medium">${date} ${time}:</span> Presença ${record.status === 'presente' ? 'registrada' : record.status}`;
+                        attendanceList.appendChild(listItem);
+                    });
+                }
+            }, (error) => {
+                console.error("Erro ao carregar registros de presença:", error);
+                attendanceList.innerHTML = '<p class="text-red-500">Erro ao carregar registros.</p>';
+            });
+        }
+
+        // Inicialização do Firebase e autenticação
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Listener para o estado de autenticação
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = userId;
+                        isAuthReady = true;
+                        console.log("Firebase autenticado. User ID:", userId);
+                        loadAttendanceRecords(); // Carrega os registros após a autenticação
+                    } else {
+                        // Se não houver usuário logado, tenta fazer login anônimo
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (anonError) {
+                            console.error("Erro ao autenticar anonimamente:", anonError);
+                            userId = 'Erro de Autenticação';
+                            userIdDisplay.textContent = userId;
+                            showMessage('Erro de autenticação Firebase. Recarregue a página.', 'error');
+                            isAuthReady = false;
+                        }
+                    }
+                    loadingOverlay.style.display = 'none'; // Esconde o overlay de carregamento
+                });
+            } catch (error) {
+                console.error("Erro ao inicializar Firebase:", error);
+                showMessage('Erro ao inicializar Firebase. Verifique a configuração.', 'error');
+                loadingOverlay.style.display = 'none'; // Esconde o overlay mesmo com erro
+                isAuthReady = false;
+            }
+        }
+
+        // Event Listeners
+        registerButton.addEventListener('click', registerPresence);
+
+        // Inicia o aplicativo
+        window.onload = async () => {
+            await initializeFirebase(); // Primeiro inicializa o Firebase
+            await loadModels(); // Depois carrega os modelos da face-api.js
+            await startCamera(); // E então inicia a câmera
+        };
+    </script>
+</body>
+</html>
