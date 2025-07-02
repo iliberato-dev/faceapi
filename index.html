@@ -104,7 +104,7 @@
 <body>
     <div class="loading-overlay" id="loadingOverlay">
         <div class="spinner"></div>
-        <p>Carregando modelos de IA e configurando Firebase...</p>
+        <p>Carregando modelos de IA...</p>
     </div>
 
     <div class="container">
@@ -134,21 +134,13 @@
 
     <!-- Face-API.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-    <!-- Firebase SDKs -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, collection, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Variáveis globais fornecidas pelo ambiente Canvas
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        let db;
-        let auth;
-        let userId = 'loading'; // Inicializa com um valor para indicar carregamento
-        let isAuthReady = false; // Flag para indicar que a autenticação foi concluída
+        // Gera um ID de usuário único para o localStorage
+        let userId = localStorage.getItem('localUserId');
+        if (!userId) {
+            userId = crypto.randomUUID();
+            localStorage.setItem('localUserId', userId);
+        }
 
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
@@ -226,10 +218,6 @@
 
         // Função para registrar a presença
         async function registerPresence() {
-            if (!isAuthReady) {
-                showMessage('Autenticação Firebase não concluída. Tente novamente em breve.', 'error');
-                return;
-            }
             if (!video.srcObject) {
                 showMessage('Câmera não está ativa.', 'error');
                 return;
@@ -250,13 +238,16 @@
 
                 if (detections.length > 0) {
                     // Rosto detectado
-                    const attendanceRef = collection(db, `artifacts/${appId}/users/${userId}/attendance_records`);
-                    await setDoc(doc(attendanceRef), {
-                        timestamp: serverTimestamp(),
+                    const currentRecords = JSON.parse(localStorage.getItem(`attendance_records_${userId}`) || '[]');
+                    const newRecord = {
+                        timestamp: new Date().toISOString(), // Armazena como string ISO para compatibilidade
                         userId: userId,
                         status: 'presente'
-                    });
+                    };
+                    currentRecords.push(newRecord);
+                    localStorage.setItem(`attendance_records_${userId}`, JSON.stringify(currentRecords));
                     showMessage('Presença Registrada com Sucesso!', 'success');
+                    loadAttendanceRecords(); // Recarrega a lista após o registro
                 } else {
                     // Nenhum rosto detectado
                     showMessage('Nenhum Rosto Detectado! Por favor, posicione-se melhor.', 'error');
@@ -271,87 +262,28 @@
 
         // Função para carregar e exibir os registros de presença
         function loadAttendanceRecords() {
-            if (!isAuthReady || !db || !userId) {
-                console.log("Firestore ou userId não estão prontos para carregar registros.");
-                return;
-            }
+            const storedRecords = localStorage.getItem(`attendance_records_${userId}`);
+            const records = storedRecords ? JSON.parse(storedRecords).map(record => ({
+                ...record,
+                timestamp: new Date(record.timestamp) // Converte string ISO de volta para Date
+            })) : [];
 
-            const attendanceCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/attendance_records`);
-            // Nota: Evitando orderBy para evitar problemas de índice.
-            // A ordenação será feita em memória.
+            // Ordenar em memória (mais recente primeiro)
+            records.sort((a, b) => b.timestamp - a.timestamp);
 
-            onSnapshot(attendanceCollectionRef, (snapshot) => {
-                const records = [];
-                snapshot.forEach(doc => {
-                    const data = doc.data();
-                    records.push({
-                        id: doc.id,
-                        timestamp: data.timestamp ? data.timestamp.toDate() : new Date(), // Converte Timestamp para Date
-                        status: data.status
-                    });
+            attendanceList.innerHTML = ''; // Limpa a lista existente
+
+            if (records.length === 0) {
+                attendanceList.innerHTML = '<p class="text-gray-500">Nenhum registro ainda.</p>';
+            } else {
+                records.forEach(record => {
+                    const date = record.timestamp.toLocaleDateString('pt-BR');
+                    const time = record.timestamp.toLocaleTimeString('pt-BR');
+                    const listItem = document.createElement('p');
+                    listItem.className = 'text-sm text-gray-800 mb-1';
+                    listItem.innerHTML = `<span class="font-medium">${date} ${time}:</span> Presença ${record.status === 'presente' ? 'registrada' : record.status}`;
+                    attendanceList.appendChild(listItem);
                 });
-
-                // Ordenar em memória (mais recente primeiro)
-                records.sort((a, b) => b.timestamp - a.timestamp);
-
-                attendanceList.innerHTML = ''; // Limpa a lista existente
-
-                if (records.length === 0) {
-                    attendanceList.innerHTML = '<p class="text-gray-500">Nenhum registro ainda.</p>';
-                } else {
-                    records.forEach(record => {
-                        const date = record.timestamp.toLocaleDateString('pt-BR');
-                        const time = record.timestamp.toLocaleTimeString('pt-BR');
-                        const listItem = document.createElement('p');
-                        listItem.className = 'text-sm text-gray-800 mb-1';
-                        listItem.innerHTML = `<span class="font-medium">${date} ${time}:</span> Presença ${record.status === 'presente' ? 'registrada' : record.status}`;
-                        attendanceList.appendChild(listItem);
-                    });
-                }
-            }, (error) => {
-                console.error("Erro ao carregar registros de presença:", error);
-                attendanceList.innerHTML = '<p class="text-red-500">Erro ao carregar registros.</p>';
-            });
-        }
-
-        // Inicialização do Firebase e autenticação
-        async function initializeFirebase() {
-            try {
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-
-                // Listener para o estado de autenticação
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        userIdDisplay.textContent = userId;
-                        isAuthReady = true;
-                        console.log("Firebase autenticado. User ID:", userId);
-                        loadAttendanceRecords(); // Carrega os registros após a autenticação
-                    } else {
-                        // Se não houver usuário logado, tenta fazer login anônimo
-                        try {
-                            if (initialAuthToken) {
-                                await signInWithCustomToken(auth, initialAuthToken);
-                            } else {
-                                await signInAnonymously(auth);
-                            }
-                        } catch (anonError) {
-                            console.error("Erro ao autenticar anonimamente:", anonError);
-                            userId = 'Erro de Autenticação';
-                            userIdDisplay.textContent = userId;
-                            showMessage('Erro de autenticação Firebase. Recarregue a página.', 'error');
-                            isAuthReady = false;
-                        }
-                    }
-                    loadingOverlay.style.display = 'none'; // Esconde o overlay de carregamento
-                });
-            } catch (error) {
-                console.error("Erro ao inicializar Firebase:", error);
-                showMessage('Erro ao inicializar Firebase. Verifique a configuração.', 'error');
-                loadingOverlay.style.display = 'none'; // Esconde o overlay mesmo com erro
-                isAuthReady = false;
             }
         }
 
@@ -360,9 +292,11 @@
 
         // Inicia o aplicativo
         window.onload = async () => {
-            await initializeFirebase(); // Primeiro inicializa o Firebase
-            await loadModels(); // Depois carrega os modelos da face-api.js
-            await startCamera(); // E então inicia a câmera
+            userIdDisplay.textContent = userId; // Exibe o userId gerado
+            loadingOverlay.style.display = 'none'; // Esconde o overlay de carregamento
+            await loadModels(); // Carrega os modelos da face-api.js
+            await startCamera(); // Inicia a câmera
+            loadAttendanceRecords(); // Carrega os registros do localStorage
         };
     </script>
 </body>
